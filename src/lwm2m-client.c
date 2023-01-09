@@ -8,6 +8,8 @@
 #define LOG_MODULE_NAME net_lwm2m_client_app
 #define LOG_LEVEL LOG_LEVEL_DBG
 
+#include <stdlib.h>
+
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
@@ -15,13 +17,26 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/net/net_conn_mgr.h>
+#include <zephyr/net/net_core.h>
+#include <zephyr/net/net_event.h>
+#include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/lwm2m.h>
 #include "modules.h"
+
+#ifdef CONFIG_WIFI
+#include <zephyr/net/wifi.h>
+#include <zephyr/net/wifi_mgmt.h>
+
+#define CONFIG_WIFI_SSID "<WIFI_SSID>"
+#define CONFIG_WIFI_PASSWORD "<WIFI_PASSWORD>"
+
+#endif // CONFIG_WIFI
 
 #define APP_BANNER "Run LWM2M client"
 
 #if !defined(CONFIG_NET_CONFIG_PEER_IPV4_ADDR)
-#define CONFIG_NET_CONFIG_PEER_IPV4_ADDR ""
+#define CONFIG_NET_CONFIG_PEER_IPV4_ADDR "192.168.1.28"
 #endif
 
 #if !defined(CONFIG_NET_CONFIG_PEER_IPV6_ADDR)
@@ -75,6 +90,55 @@ static const char client_psk_id[] = "Client_identity";
 #endif /* CONFIG_LWM2M_DTLS_SUPPORT */
 
 static struct k_sem quit_lock;
+
+void network_initialize(void)
+{
+	LOG_INF("Initializing network connection...");
+#ifdef CONFIG_WIFI
+	struct net_if *iface = net_if_get_default();
+
+	struct wifi_connect_req_params wifi_params = {
+		.ssid = (uint8_t *)CONFIG_WIFI_SSID,
+		.ssid_length = strlen(CONFIG_WIFI_SSID),
+		.psk = (uint8_t *)CONFIG_WIFI_PASSWORD,
+		.psk_length = strlen(CONFIG_WIFI_PASSWORD),
+		.security = WIFI_SECURITY_TYPE_PSK
+	};
+
+	if (net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &wifi_params,
+		     sizeof(struct wifi_connect_req_params))) {
+		LOG_ERR("Failed to configure Wi-Fi");
+		abort();
+	}
+	net_mgmt_event_wait_on_iface(iface, NET_EVENT_IPV4_ADDR_ADD, NULL, NULL, NULL, K_FOREVER);
+
+	LOG_INF("Connected to network");
+
+	for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
+		char buf[NET_IPV4_ADDR_LEN];
+
+		if (iface->config.ip.ipv4->unicast[i].addr_type !=
+							NET_ADDR_DHCP) {
+			continue;
+		}
+
+		LOG_INF("Your address: %s",
+			net_addr_ntop(AF_INET,
+			    &iface->config.ip.ipv4->unicast[i].address.in_addr,
+						  buf, sizeof(buf)));
+		LOG_INF("Lease time: %u seconds",
+			 iface->config.dhcpv4.lease_time);
+		LOG_INF("Subnet: %s",
+			net_addr_ntop(AF_INET,
+				       &iface->config.ip.ipv4->netmask,
+				       buf, sizeof(buf)));
+		LOG_INF("Router: %s",
+			net_addr_ntop(AF_INET,
+						 &iface->config.ip.ipv4->gw,
+						 buf, sizeof(buf)));
+	}
+#endif // CONFIG_WIFI
+}
 
 static int device_reboot_cb(uint16_t obj_inst_id,
 			    uint8_t *args, uint16_t args_len)
@@ -314,6 +378,8 @@ void main(void)
 				LWM2M_RD_CLIENT_FLAG_BOOTSTRAP : 0;
 	int ret;
 
+	network_initialize();
+	
 	LOG_INF(APP_BANNER);
 
 	k_sem_init(&quit_lock, 0, K_SEM_MAX_LIMIT);
